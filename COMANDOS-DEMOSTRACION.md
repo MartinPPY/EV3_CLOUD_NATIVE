@@ -70,6 +70,12 @@ Tardíos (fuera de la gracia, también van a la DLQ) y duplicados, por log (desd
 
 `docker compose logs consumer | grep -E "TARDIO_DESCARTADO|DUPLICADO|DLQ"`
 
+**Versión automatizada de la demo de duplicados (desde ec2-app, vía Session Manager)**
+
+`sudo bash /opt/ventas/demo-duplicados.sh` (lo copia `npm run deploy-app`). Envía el mismo `eventId` dos veces, muestra que la idempotencia del
+producer no lo evita (ambos quedan en `ventas-raw`), que el consumer deriva el segundo a la DLQ como `EVENT_ID_DUPLICADO` y que, tras un
+`kill -9` del consumer, el estado de deduplicación se restaura desde el changelog. Opciones: `--sin-crash`, `--pausa`, `--evidencia DIR`.
+
 La DLQ trae el sobre con `sourceTopic`, `key`, `originalValue` y `reason`; esperados: JSON_MALFORMADO, CAMPO_FALTANTE,
 CAMPO_INVALIDO, EVENT_TIME_INVALIDO, TOTAL_INCONSISTENTE, EVENT_ID_DUPLICADO y EVENTO_TARDIO (el tardío fuera de gracia, paso 13).
 Agregados esperados: A W0 (3 ventas, 58000), A W1 (2, 16000), B W0 (1, 5000).
