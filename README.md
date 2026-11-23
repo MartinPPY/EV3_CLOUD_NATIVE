@@ -107,9 +107,15 @@ flowchart TB
 │   ├── deploy-app.js                  # Sincroniza app/, compila imagen Docker y levanta servicios en act3-app
 │   ├── deploy-monitoring.js           # Despliega Prometheus/Loki/Grafana y Alloy en los 4 nodos
 │   ├── configure-nginx.js             # Configura Nginx reverse proxy + HTTPS Certbot en Kafka UI y Grafana
-│   └── ec2/                           # Scripts de demostración que se ejecutan DENTRO de las EC2 (no en local)
-│       ├── demo-duplicados.sh         # Deduplicación por eventId vs. idempotencia del producer, con crash del consumer
-│       └── demo-tolerancia-fallos.sh  # Caída y recuperación de un broker con consumer escalado a 2 (vía SSM)
+│   └── ec2/                           # Scripts que se ejecutan DENTRO de la EC2 de la app (no en local)
+│       └── demostracion/              # Una demostración por script, en orden de presentación (+ lib.sh con los helpers)
+│           ├── 01-topologia.sh        # Particiones, RF, retención, ISR y por qué 2 brokers no admiten RF=3
+│           ├── 02-flujo-completo.sh   # Venta JSON -> partición -> agregado de ventana
+│           ├── 03-mensaje-invalido.sh # Inválidos: el consumer continúa, DLQ con original y motivo, log
+│           ├── 04-duplicados.sh       # Duplicado: el monto/conteo no se duplica; estado en changelog; crash del consumer
+│           ├── 05-evento-tardio.sh    # Tardío dentro/fuera de gracia y limitaciones observadas
+│           ├── 06-recuperacion.sh     # Caída y recuperación de un broker: ISR y estado de producer/consumers (vía SSM)
+│           └── 07-operacion.sh        # Consumer group, offsets, lag, reparto de particiones y acción operativa
 └── terraform/                         # Infraestructura como Código (AWS VPC, SG, EC2, EIP) en 2 entornos
     ├── environments/
     │   ├── lab/                       # AWS Academy Learner Lab (LabInstanceProfile, credenciales de sesión)
@@ -262,7 +268,7 @@ Verifica `app/.env` y ejecuta:
 npm run deploy-app
 ```
 
-Esto sube `app/` a S3, sincroniza `/opt/ventas` en `act3-app`, compila la imagen `ventas-app:latest`, crea los tópicos (`ventas-raw`, `ventas-agregadas`, `ventas-raw-dlq`) e inicia `consumer` y `producer`. Además copia a `/opt/ventas` los scripts de [`scripts/ec2/`](./scripts/ec2/) con permiso de ejecución (solo los copia; se corren a mano, ver [Scripts de demostración](#scripts-de-demostración-en-las-ec2)).
+Esto sube `app/` a S3, sincroniza `/opt/ventas` en `act3-app`, compila la imagen `ventas-app:latest`, crea los tópicos (`ventas-raw`, `ventas-agregadas`, `ventas-raw-dlq`) e inicia `consumer` y `producer`. Además copia a `/opt/ventas/demostracion/` los scripts de [`scripts/ec2/demostracion/`](./scripts/ec2/demostracion/) con permiso de ejecución (solo los copia; se corren a mano, ver [Scripts de demostración](#scripts-de-demostración-en-las-ec2)).
 
 ### Paso 5. Desplegar observabilidad (Prometheus + Loki + Grafana + Alloy)
 Verifica `monitoring/monitoring.env` (contraseña segura y dominio) y ejecuta:
@@ -304,14 +310,19 @@ Para validar en vivo el clúster (ISR, failover de broker, inspección de tópic
 
 ### Scripts de demostración en las EC2
 
-Los scripts de [`scripts/ec2/`](./scripts/ec2/) automatizan las demos con verificaciones (`OK` / `FALLO`) y terminan con código distinto de 0 si alguna falla. `npm run deploy-app` los deja en `/opt/ventas` de `act3-app`; se ejecutan desde una sesión de Session Manager (no desde la máquina local). Ambos aceptan `--pausa` (Enter entre pasos, para narrar en vivo) y `--evidencia DIR` (guarda la salida de cada paso), y `-h` muestra la ayuda.
+Los scripts de [`scripts/ec2/demostracion/`](./scripts/ec2/demostracion/) automatizan las 7 demostraciones con verificaciones (`OK` / `FALLO`) y terminan con código distinto de 0 si alguna falla. `npm run deploy-app` los deja en `/opt/ventas/demostracion/` de `act3-app`; se ejecutan **dentro de esa EC2**, desde una sesión de Session Manager (no desde la máquina local). Solo usan `bash`, `docker`, `curl`, `awk`/`sed`/`grep` y GNU `date`; el CLI de Kafka corre en un contenedor `cp-kafka` efímero contra `KAFKA_BOOTSTRAP`. Todos aceptan `--pausa` (Enter entre pasos, para narrar en vivo) y `--evidencia DIR` (guarda la salida de cada paso), y `-h` muestra la ayuda. `lib.sh` contiene los helpers compartidos y no se ejecuta solo.
 
-| Script | Qué demuestra | Uso |
-|---|---|---|
-| `demo-duplicados.sh` | Un mismo `eventId` enviado dos veces entra dos veces a `ventas-raw` (la idempotencia del producer no lo evita) y el consumer lo descarta a la DLQ como `EVENT_ID_DUPLICADO`; tras un `kill -9` del consumer el estado de deduplicación se restaura desde el changelog. | `sudo bash /opt/ventas/demo-duplicados.sh [--sin-crash]` |
-| `demo-tolerancia-fallos.sh` | Escala el consumer a 2, detiene `kafka-2` y verifica failover de líderes, ISR reducido, pipeline vivo y recuperación del ISR de 2 brokers. Envía cada comando docker por SSM a la EC2 correspondiente (el instance profile necesita SSM y `ec2:DescribeInstances`). | `sudo bash /opt/ventas/demo-tolerancia-fallos.sh [--fallo contenedor\|daemon] [--espera SEG] [--no-recuperar]` |
+| # | Script | Qué demuestra | Uso (`sudo bash /opt/ventas/demostracion/…`) |
+|---|---|---|---|
+| 1 | `01-topologia.sh` | Brokers, particiones (4/2/4), RF=2, retención efectiva, `min.insync.replicas`, ISR y tópicos internos; un `--create --replication-factor 3` que falla (`larger than available brokers: 2`) y por qué 2 brokers no admiten RF=3. | `01-topologia.sh` |
+| 2 | `02-flujo-completo.sh` | Una venta JSON (`eventTime`, `customerId`): partición según la key en `ventas-raw`, repartition por tienda y resultado en `ventas-agregadas` (inicio/fin de ventana, ventas, monto). | `02-flujo-completo.sh` |
+| 3 | `03-mensaje-invalido.sh` | 5 inválidos + 1 válido: el consumer no se reinicia ni falla, la DLQ guarda original y motivo, el log `[DLQ]` explica cada rechazo y el offset del grupo avanza. | `03-mensaje-invalido.sh` |
+| 4 | `04-duplicados.sh` | Un mismo `eventId` enviado dos veces entra dos veces a `ventas-raw` (la idempotencia del producer no lo evita), va a la DLQ como `EVENT_ID_DUPLICADO` y el agregado no lo cuenta dos veces (2 ventas / 15000, no 3 / 25000); store de dedup y su changelog; tras un `kill -9` del consumer el estado se restaura. | `04-duplicados.sh [--sin-crash]` |
+| 5 | `05-evento-tardio.sh` | Política de ventana + gracia: un evento dentro de la gracia se suma a su ventana; uno fuera de gracia va a la DLQ como `EVENTO_TARDIO` (log y métrica). Limitaciones observadas (precedencia tardío/duplicado, stream time por partición). | `05-evento-tardio.sh` |
+| 6 | `06-recuperacion.sh` | Escala el consumer a 2, detiene `kafka-2` y muestra, antes/durante/después, ISR, líderes, estado de producer y consumers, offsets y miembros del grupo. Envía cada comando docker por SSM a la EC2 correspondiente (el instance profile necesita SSM y `ec2:DescribeInstances`). | `06-recuperacion.sh [--fallo contenedor\|daemon] [--espera SEG] [--no-recuperar]` |
+| 7 | `07-operacion.sh` | Estado del consumer group, offsets y lag por partición, reparto de particiones entre miembros y brokers, entrada vs. consumo y tabla métrica → acción operativa (equivalente por CLI de Kafka UI). | `07-operacion.sh [--escalar] [--lag-alerta N]` |
 
-`demo-duplicados.sh` escribe eventos de prueba en `ventas-raw` y `ventas-raw-dlq` y reinicia el consumer (los contadores de `BusinessMetrics` vuelven a 0). `demo-tolerancia-fallos.sh` deja el consumer escalado a 2 réplicas y, con `--no-recuperar`, el broker 2 caído (el script imprime cómo recuperarlo).
+Efectos: las demos 2-5 escriben ventas de prueba en `ventas-raw` (y sobres en la DLQ) con **tiendas y clientes reales del producer** (`Paris Costanera Center`, `Falabella Plaza Oeste`, `cliente-01xx`); esas ventas quedan en `ventas-agregadas` como cualquier otra. Las demos que miden el agregado (2, 5 y el bloque final de 4) **pausan el producer** (`docker compose stop producer`) para que ninguna venta en vivo se mezcle con el resultado, usan una ventana futura que aún no recibió ventas y envían un evento de cierre de 1 CLP (`eventTime` = fin de ventana + gracia + 10 s) que adelanta el stream time de esa partición hasta ~3.5 min. El producer se **reactiva solo** cuando ese instante pasa (si no, sus ventas serían tardías), así que `06` (que necesita el producer en marcha) conviene correrlo después. `03` no pausa nada. `04` reinicia el consumer (los contadores de `BusinessMetrics` vuelven a 0). `06` deja el consumer escalado a 2 réplicas y, con `--no-recuperar`, el broker 2 caído (el script imprime cómo recuperarlo). `07` solo lee, salvo con `--escalar`.
 
 ---
 
@@ -382,7 +393,7 @@ replicación de datos con RF=2 **no protege** al plano de control:
 
 Pasos reproducibles para demostrar failover, ISR y el efecto del SPOF: sección *Probar fallo de docker* de
 [`COMANDOS-DEMOSTRACION.md`](./COMANDOS-DEMOSTRACION.md). El failover de un broker también está automatizado con
-[`scripts/ec2/demo-tolerancia-fallos.sh`](./scripts/ec2/demo-tolerancia-fallos.sh) (ver [Scripts de demostración](#scripts-de-demostración-en-las-ec2)); la demo del SPOF de ZooKeeper sigue siendo manual y destructiva.
+[`scripts/ec2/demostracion/06-recuperacion.sh`](./scripts/ec2/demostracion/06-recuperacion.sh) (ver [Scripts de demostración](#scripts-de-demostración-en-las-ec2)); la demo del SPOF de ZooKeeper sigue siendo manual y destructiva.
 
 ---
 

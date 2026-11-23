@@ -70,11 +70,24 @@ Tardíos (fuera de la gracia, también van a la DLQ) y duplicados, por log (desd
 
 `docker compose logs consumer | grep -E "TARDIO_DESCARTADO|DUPLICADO|DLQ"`
 
-**Versión automatizada de la demo de duplicados (desde ec2-app, vía Session Manager)**
+**Versión automatizada de las demostraciones (desde ec2-app, vía Session Manager; no desde la máquina local)**
 
-`sudo bash /opt/ventas/demo-duplicados.sh` (lo copia `npm run deploy-app`). Envía el mismo `eventId` dos veces, muestra que la idempotencia del
-producer no lo evita (ambos quedan en `ventas-raw`), que el consumer deriva el segundo a la DLQ como `EVENT_ID_DUPLICADO` y que, tras un
-`kill -9` del consumer, el estado de deduplicación se restaura desde el changelog. Opciones: `--sin-crash`, `--pausa`, `--evidencia DIR`.
+`npm run deploy-app` copia a `/opt/ventas/demostracion/` un script por demostración (detalle en `README.md`, "Scripts de demostración en las EC2").
+Todos con `sudo bash /opt/ventas/demostracion/<script>` y opciones `--pausa`, `--evidencia DIR`, `-h`:
+
+| Demostración | Script |
+|---|---|
+| 1. Topología y configuración real; por qué 2 brokers no admiten RF=3 | `01-topologia.sh` |
+| 2. Flujo completo: venta JSON → partición → agregado | `02-flujo-completo.sh` |
+| 3. Mensaje inválido: el consumer continúa, DLQ y log | `03-mensaje-invalido.sh` |
+| 4. Duplicado: el monto/conteo no se duplica; estado y crash | `04-duplicados.sh [--sin-crash]` |
+| 5. Evento tardío dentro/fuera de gracia | `05-evento-tardio.sh` |
+| 6. Recuperación ante la caída de un broker | `06-recuperacion.sh` (ver "Probar fallo de docker") |
+| 7. Operación: consumer group, offsets, lag, particiones | `07-operacion.sh [--escalar]` |
+
+`04-duplicados.sh` envía el mismo `eventId` dos veces, muestra que la idempotencia del producer no lo evita (ambos quedan en `ventas-raw`), que el
+consumer deriva el segundo a la DLQ como `EVENT_ID_DUPLICADO`, que el agregado cuenta la venta una sola vez y que, tras un `kill -9` del consumer,
+el estado de deduplicación se restaura desde el changelog.
 
 La DLQ trae el sobre con `sourceTopic`, `key`, `originalValue` y `reason`; esperados: JSON_MALFORMADO, CAMPO_FALTANTE,
 CAMPO_INVALIDO, EVENT_TIME_INVALIDO, TOTAL_INCONSISTENTE, EVENT_ID_DUPLICADO y EVENTO_TARDIO (el tardío fuera de gracia, paso 13).
@@ -107,8 +120,8 @@ Se tolera la caída de **un** broker; ZooKeeper (un solo nodo) es un **punto ún
 
 **Versión automatizada (desde cualquier EC2, p. ej. ec2-app, vía Session Manager; no desde la máquina local)**
 
-`sudo bash /opt/ventas/demo-tolerancia-fallos.sh` (lo copia `npm run deploy-app`). Escala el consumer a 2, verifica tópicos/líderes/ISR,
-detiene `kafka-2`, vuelve a verificar y recupera. Envía cada comando docker por AWS SSM a la EC2 correspondiente (el rol de la EC2
+`sudo bash /opt/ventas/demostracion/06-recuperacion.sh` (lo copia `npm run deploy-app`). Escala el consumer a 2, verifica tópicos/líderes/ISR y el estado
+de producer y consumers, detiene `kafka-2`, vuelve a verificar y recupera. Envía cada comando docker por AWS SSM a la EC2 correspondiente (el rol de la EC2
 necesita SSM y `ec2:DescribeInstances`). Opciones: `--fallo daemon` (cae el servicio docker en vez del contenedor), `--no-recuperar`, `--espera`, `--pausa`, `--evidencia DIR`.
 
 **1. Baseline (desde ec2-zookeper)**

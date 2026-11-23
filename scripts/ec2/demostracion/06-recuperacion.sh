@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Demuestra que el pipeline se recupera de la caída de un broker (kafka-2) con el consumer escalado a 2.
+# Demostración 6: recuperación ante la caída de un broker (kafka-2) con el consumer escalado a 2. Muestra, ANTES, DURANTE y
+# DESPUÉS de la caída, el ISR de los tópicos y el estado del productor y de los consumidores (contenedores, último evento
+# producido, miembros y lag del grupo, offsets de ventas-raw y ventas-agregadas).
 #
 # DÓNDE SE EJECUTA: dentro de una EC2 del laboratorio (cualquiera; no en la máquina local), p. ej. desde una sesión
-# de Session Manager en act3-app, donde `node deploy-app.js` ya lo copia a /opt/ventas. Usa AWS CLI v2 (lo instala
+# de Session Manager en act3-app, donde `node deploy-app.js` ya lo copia a /opt/ventas/demostracion. Usa AWS CLI v2 (lo instala
 # el user_data) con las credenciales del instance profile de la EC2 (rol con SSM + ec2:DescribeInstances, como
 # LabInstanceProfile): no hay que exportar credenciales ni abrir SSH, y no necesita permisos de docker en la EC2
 # donde corre. Cada comando docker se envía por AWS SSM (Run Command) a la EC2 que corresponde, y el script imprime
@@ -15,17 +17,18 @@
 # Flujo:
 #   1 escalar consumer a 2       docker compose up -d --scale consumer=2 (espera 2 miembros en el grupo)
 #   2 líderes / ISR / tópicos    esperado: cada partición con Isr de los 2 brokers y 0 under-replicated
-#   3 offsets de ventas-raw      línea base para demostrar que el pipeline sigue vivo
+#   3 offsets + estado de la app línea base: offsets de ventas-raw/ventas-agregadas, producer y 2 consumers running, último evento producido
 #   4 caída del broker 2         docker compose stop kafka-2 (o, con --fallo daemon, systemctl stop docker)
 #   5 líderes / ISR              esperado: Leader 1 en todas las particiones, Isr de un solo broker, under-replicated > 0
-#   6 pipeline vivo              los offsets de ventas-raw siguen subiendo y el grupo conserva sus 2 miembros
+#   6 pipeline vivo              los offsets de ventas-raw siguen subiendo; producer y consumers siguen running, el producer sigue
+#                                produciendo (último evento reciente) y el grupo conserva sus 2 miembros
 #   7 recuperación               docker compose start kafka-2 (con --fallo daemon: systemctl start docker y la
 #                                política restart: unless-stopped levanta sola el contenedor)
 #   8 líderes / ISR              esperado: Isr de los 2 brokers otra vez y 0 under-replicated
-#   9 pipeline tras recuperar    offsets siguen subiendo, grupo con 2 miembros
+#   9 pipeline tras recuperar    offsets siguen subiendo, producer/consumers running, grupo con 2 miembros
 #
-# Uso:  bash /opt/ventas/demo-tolerancia-fallos.sh [--fallo contenedor|daemon] [--espera SEG] [--no-recuperar]
-#                                              [--pausa] [--evidencia DIR]
+# Uso:  bash /opt/ventas/demostracion/06-recuperacion.sh [--fallo contenedor|daemon] [--espera SEG] [--no-recuperar]
+#                                                        [--pausa] [--evidencia DIR]
 #   --fallo      contenedor (por defecto): detiene solo kafka-2 | daemon: detiene el servicio docker de la EC2 del broker
 #   --espera     segundos con el broker caído antes de medir que el pipeline sigue (20)
 #   --no-recuperar  omite los pasos 7-9 (deja kafka-2 caído; el script imprime cómo recuperarlo)
@@ -52,6 +55,7 @@ APP_DIR="${APP_DIR:-/opt/ventas}"
 KAFKA_DIR="${KAFKA_DIR:-/opt/kafka}"
 TOPICS="${TOPICS:-ventas-raw ventas-agregadas ventas-raw-dlq}"
 RAW_TOPIC="${RAW_TOPIC:-ventas-raw}"
+AGG_TOPIC_NOMBRE="${AGG_TOPIC:-ventas-agregadas}"
 BROKER_FALLA_ID="${BROKER_FALLA_ID:-2}"
 BROKER_SOBREVIVE_ID="${BROKER_SOBREVIVE_ID:-1}"
 BROKER_SERVICE="kafka-2"
@@ -69,7 +73,7 @@ while [ $# -gt 0 ]; do
     --no-recuperar) RECUPERAR=0 ;;
     --pausa) PAUSA=1 ;;
     --evidencia) shift; EVIDENCIA="${1:?--evidencia requiere un directorio}" ;;
-    -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^[^#]/{/^[^#]/!p}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opción desconocida: $1" >&2; exit 2 ;;
   esac
   shift
@@ -152,6 +156,7 @@ def PRE_APP <<'EOF'
 export HOME=/root; cd "$APP_DIR" || exit 1
 ev() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | tr -d '\r'; }
 BS="$(ev KAFKA_BOOTSTRAP)"; G="$(ev GROUP_ID)"; G="${G:-ventas-aggregator}"; V="$(ev CONFLUENT_VERSION)"
+AGG="$(ev AGG_TOPIC)"; AGG="${AGG:-ventas-agregadas}"
 kcli() { docker run --rm --network host "confluentinc/cp-kafka:${V:-7.5.3}" "$@" </dev/null 2>/dev/null; }
 miembros() { kcli kafka-consumer-groups --bootstrap-server "$BS" --describe --group "$G" --members | grep -c "^$G "; }
 EOF
@@ -162,6 +167,21 @@ kcli kafka-consumer-groups --bootstrap-server "$BS" --describe --group "$G" --me
 echo "## lag del grupo"
 kcli kafka-consumer-groups --bootstrap-server "$BS" --describe --group "$G" | cut -c1-140
 echo "MIEMBROS=$(miembros)"
+EOF
+
+# Estado del productor y de los consumers en la EC2 de la app. La hora del último evento producido sale del log del
+# producer: cada línea es la venta en JSON y su eventTime es el momento del envío.
+def ESTADO_APP <<'EOF'
+echo "## contenedores producer / consumer"
+docker compose ps -a --format 'table {{.Service}}\t{{.Name}}\t{{.Status}}' | grep -E 'SERVICE|producer|consumer'
+# -q lista un id por CONTENEDOR (--services lista un nombre por servicio, así que con 2 réplicas daría 1)
+echo "PRODUCER_RUNNING=$(docker compose ps --status running -q producer | grep -c .)"
+echo "CONSUMER_RUNNING=$(docker compose ps --status running -q consumer | grep -c .)"
+echo "## últimas ventas producidas (log del producer)"
+docker compose logs --tail 40 producer 2>&1 | grep -a '"eventTime"' | tail -2 | sed 's/^[^|]*| //' | cut -c1-200
+ult="$(docker compose logs --tail 40 producer 2>&1 | grep -a -o '"eventTime":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+[ -n "$ult" ] && echo "PRODUCER_ULTIMO_EVENTO_HACE_S=$(( $(date +%s) - $(date -d "$ult" +%s) ))"
+echo "STREAMS_ERROR=$(docker compose logs --since 10m consumer 2>&1 | grep -c STREAMS_ERROR)"
 EOF
 
 # Script para la EC2 de kafka-1/ZooKeeper. modo: ver | esperar-caida (hasta que el broker caído no sea líder
@@ -177,7 +197,8 @@ zk_remoto() {
 app_remoto() { # cuerpo
   printf '%s\n' "APP_DIR='$APP_DIR'; RAW_TOPIC='$RAW_TOPIC'" "$PRE_APP" "$1"
 }
-OFFSETS_CMD='echo "OFFSETS_RAW=$(kcli kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server "$BS" --topic "$RAW_TOPIC" --time -1 | awk -F: "{s+=\$3} END{print s+0}")"'
+OFFSETS_CMD='echo "OFFSETS_RAW=$(kcli kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server "$BS" --topic "$RAW_TOPIC" --time -1 | awk -F: "{s+=\$3} END{print s+0}")"
+echo "OFFSETS_AGG=$(kcli kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server "$BS" --topic "$AGG" --time -1 | awk -F: "{s+=\$3} END{print s+0}")"'
 COMPOSE_PS="docker compose ps -a --format 'table {{.Name}}\t{{.Service}}\t{{.Status}}'"
 
 # ---- helpers de salida y verificación --------------------------------------------------------------
@@ -203,6 +224,7 @@ check_cond() { # descripcion, detalle, comando de prueba...
   else printf '\033[1;31m  FALLO \033[0m %s (%s)\n' "$desc" "$detalle"; FAILS=$((FAILS + 1)); fi
 }
 valor() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p" | tail -1 | tr -d '[:space:]'; }
+solo_num() { local n="${1//[!0-9]/}"; printf "%s" "${n:-0}"; }
 cuenta() { printf '%s\n' "$OUT" | grep 'Partition: ' | grep -cE "$1" || true; }
 # Cuenta particiones del describe en $OUT: TOTAL, con ISR de 2 brokers, y con líder en el broker sobreviviente
 analiza() {
@@ -244,9 +266,11 @@ check "particiones con ISR de los 2 brokers" "$TOTAL" "$ISR2"
 check "particiones under-replicated" 0 "$URP"
 
 # ---- 3. línea base de offsets ----------------------------------------------------------------------
-paso_cuerpo() { ssm_run app "kafka-run-class GetOffsetShell --topic $RAW_TOPIC  (suma de offsets finales)" "$(app_remoto "$OFFSETS_CMD")"; }
-paso offsets-base "Offsets de $RAW_TOPIC antes del fallo"
-OFF0="$(valor OFFSETS_RAW)"; OFF0="${OFF0:-0}"
+paso_cuerpo() { ssm_run app "offsets de $RAW_TOPIC / agregadas, estado de producer y consumers" "$(app_remoto "$OFFSETS_CMD"$'\n'"$ESTADO_APP")"; }
+paso offsets-base "Antes del fallo: offsets de $RAW_TOPIC y estado del productor y de los consumers"
+OFF0="$(valor OFFSETS_RAW)"; OFF0="${OFF0:-0}"; OFFA0="$(valor OFFSETS_AGG)"; OFFA0="${OFFA0:-0}"
+check "contenedor producer running" 1 "$(valor PRODUCER_RUNNING)"
+check "contenedores consumer running" 2 "$(valor CONSUMER_RUNNING)"
 
 # ---- 4. caída del broker 2 -------------------------------------------------------------------------
 if [ "$FALLO" = daemon ]; then
@@ -273,12 +297,16 @@ check_cond "particiones under-replicated > 0" "obtenido $URP" test "$URPN" -gt 0
 paso_cuerpo() {
   echo "Esperando ${ESPERA}s con el broker caído para medir si el producer y el consumer siguen avanzando..."
   sleep "$ESPERA"
-  ssm_run app "offsets de $RAW_TOPIC y estado del grupo" "$(app_remoto "$OFFSETS_CMD"$'\n'"$GRUPO_APP")"
+  ssm_run app "offsets, estado de producer/consumers y del grupo" "$(app_remoto "$OFFSETS_CMD"$'\n'"$ESTADO_APP"$'\n'"$GRUPO_APP")"
 }
-paso pipeline-vivo "Con el broker caído: el pipeline no se detiene"
-OFF1="$(valor OFFSETS_RAW)"; OFF1="${OFF1:-0}"
-echo ">> offsets $RAW_TOPIC: antes=$OFF0 durante la caída=$OFF1"
+paso pipeline-vivo "Con el broker caído: el productor y los consumers no se detienen"
+OFF1="$(valor OFFSETS_RAW)"; OFF1="${OFF1:-0}"; OFFA1="$(valor OFFSETS_AGG)"; OFFA1="${OFFA1:-0}"
+echo ">> offsets $RAW_TOPIC: antes=$OFF0 durante la caída=$OFF1 | offsets $AGG_TOPIC_NOMBRE: antes=$OFFA0 durante=$OFFA1 (solo suben al cerrarse ventanas)"
 check_cond "el producer siguió escribiendo en $RAW_TOPIC" "+$((OFF1 - OFF0)) registros" test "$OFF1" -gt "$OFF0"
+check "contenedor producer running" 1 "$(valor PRODUCER_RUNNING)"
+check "contenedores consumer running (sin reinicios forzados)" 2 "$(valor CONSUMER_RUNNING)"
+check_cond "el producer sigue produciendo (último evento reciente)" "hace $(valor PRODUCER_ULTIMO_EVENTO_HACE_S) s, máx. 30" test "$(solo_num "$(valor PRODUCER_ULTIMO_EVENTO_HACE_S)")" -le 30 -a -n "$(valor PRODUCER_ULTIMO_EVENTO_HACE_S)"
+check "[STREAMS_ERROR] de los consumers (últimos 10 min)" 0 "$(valor STREAMS_ERROR)"
 check "miembros del grupo de consumo" 2 "$(valor MIEMBROS)"
 
 if [ "$RECUPERAR" = 0 ]; then
@@ -308,12 +336,15 @@ else
   # ---- 9. pipeline tras recuperar ------------------------------------------------------------------
   paso_cuerpo() {
     sleep 10
-    ssm_run app "offsets de $RAW_TOPIC y estado del grupo" "$(app_remoto "$OFFSETS_CMD"$'\n'"$GRUPO_APP")"
+    ssm_run app "offsets, estado de producer/consumers y del grupo" "$(app_remoto "$OFFSETS_CMD"$'\n'"$ESTADO_APP"$'\n'"$GRUPO_APP")"
   }
-  paso pipeline-recuperado "Tras la recuperación: el pipeline sigue operando"
-  OFF2="$(valor OFFSETS_RAW)"; OFF2="${OFF2:-0}"
-  echo ">> offsets $RAW_TOPIC: durante la caída=$OFF1 tras recuperar=$OFF2"
+  paso pipeline-recuperado "Tras la recuperación: el productor y los consumers siguen operando"
+  OFF2="$(valor OFFSETS_RAW)"; OFF2="${OFF2:-0}"; OFFA2="$(valor OFFSETS_AGG)"; OFFA2="${OFFA2:-0}"
+  echo ">> offsets $RAW_TOPIC: durante la caída=$OFF1 tras recuperar=$OFF2 | offsets $AGG_TOPIC_NOMBRE: durante=$OFFA1 tras recuperar=$OFFA2"
   check_cond "el producer sigue escribiendo en $RAW_TOPIC" "+$((OFF2 - OFF1)) registros" test "$OFF2" -gt "$OFF1"
+  check "contenedor producer running" 1 "$(valor PRODUCER_RUNNING)"
+  check "contenedores consumer running" 2 "$(valor CONSUMER_RUNNING)"
+  check_cond "el producer sigue produciendo (último evento reciente)" "hace $(valor PRODUCER_ULTIMO_EVENTO_HACE_S) s, máx. 30" test "$(solo_num "$(valor PRODUCER_ULTIMO_EVENTO_HACE_S)")" -le 30 -a -n "$(valor PRODUCER_ULTIMO_EVENTO_HACE_S)"
   check "miembros del grupo de consumo" 2 "$(valor MIEMBROS)"
 fi
 

@@ -4,8 +4,9 @@
 // Se ejecuta desde la máquina local, con Kafka ya desplegado (deploy-kafka.js): init-topics reintenta
 // hasta que los brokers acepten, pero sin brokers la app no arranca.
 //
-// También sube los scripts de scripts/ec2/*.sh (p. ej. demo-duplicados.sh) y los deja en remoteDir con
-// permiso de ejecución. Solo los copia: este despliegue nunca los ejecuta; se corren a mano dentro de la EC2.
+// También sube los scripts de scripts/ec2/ (los .sh, incluidas sus subcarpetas: demostracion/01-topologia.sh, ...) y los
+// deja en remoteDir con la misma ruta relativa y permiso de ejecución. Solo los copia: este despliegue nunca los ejecuta;
+// se corren a mano dentro de la EC2.
 //
 // Antes de subir avisa si ya hay copias en el bucket (se sobrescriben). Al terminar, con éxito o error,
 // borra del bucket los objetos bajo app/ (el .env puede llevar configuración sensible).
@@ -41,6 +42,7 @@ const appDir = fileURLToPath(new URL("../app/", import.meta.url));
 // Artefactos de build: la imagen se compila en la EC2
 const excluded = new Set(["target"]);
 // Scripts para correr dentro de la EC2: viajan por el mismo prefijo app/ para que `s3 sync` los deje en remoteDir
+// (con subcarpetas: scripts/ec2/demostracion/x.sh queda en remoteDir/demostracion/x.sh)
 const ec2ScriptsDir = fileURLToPath(new URL("ec2/", import.meta.url));
 
 const ec2 = new EC2Client({ region });
@@ -55,10 +57,12 @@ function localFiles() {
     .filter((p) => statSync(join(appDir, p)).isFile());
 }
 
-// Nombres de los .sh de scripts/ec2/ (vacío si la carpeta no existe)
+// Rutas relativas (con "/") de los .sh de scripts/ec2/ y sus subcarpetas (vacío si la carpeta no existe)
 function ec2Scripts() {
   if (!existsSync(ec2ScriptsDir)) return [];
-  return readdirSync(ec2ScriptsDir).filter((f) => f.endsWith(".sh") && statSync(join(ec2ScriptsDir, f)).isFile());
+  return readdirSync(ec2ScriptsDir, { recursive: true })
+    .map((p) => p.replaceAll("\\", "/"))
+    .filter((p) => p.endsWith(".sh") && statSync(join(ec2ScriptsDir, p)).isFile());
 }
 
 // Claves existentes bajo app/ (incluye el marcador de carpeta "app/" si lo hay)
@@ -185,7 +189,8 @@ async function main() {
     await upload();
     await deploy();
     console.log("\nListo: app de ventas desplegada.");
-    for (const name of ec2Scripts()) {
+    // lib.sh solo se carga con `source` desde las demostraciones: no se lista como ejecutable
+    for (const name of ec2Scripts().filter((n) => !n.endsWith("/lib.sh"))) {
       console.log(`Script disponible en la EC2 (no ejecutado): sudo bash ${remoteDir}/${name}`);
     }
   } finally {
