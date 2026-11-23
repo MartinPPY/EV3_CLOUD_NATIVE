@@ -1,0 +1,5 @@
+# Valores de ejemplo para Terraform (IPs ficticias RFC 5737).
+# Copiar este archivo como `terraform/environments/prod/terraform.tfvars` y reemplazar por los valores reales de la cuenta AWS.
+
+eip_public_ip         = "203.0.113.10"              # Reemplazar por la IP de la EIP con tag Name=eip-cloud-native
+eip_grafana_public_ip = "203.0.113.20"              # Reemplazar por la IP de la EIP con tag Name=eip-grafana

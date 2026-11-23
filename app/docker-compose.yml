@@ -1,0 +1,92 @@
+services:
+  # Crea los topics con partición/replicación explícitas antes de arrancar Streams:
+  # Kafka Streams no auto-crea sus topics fuente y fallaría con MissingSourceTopicException.
+  init-topics:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    container_name: ventas-init-topics
+    restart: "no"
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      RAW_TOPIC: ${RAW_TOPIC}
+      AGG_TOPIC: ${AGG_TOPIC}
+      DLQ_TOPIC: ${DLQ_TOPIC}
+      RAW_PARTITIONS: ${RAW_PARTITIONS}
+      AGG_PARTITIONS: ${AGG_PARTITIONS}
+      DLQ_PARTITIONS: ${DLQ_PARTITIONS}
+      TOPIC_REPLICATION_FACTOR: ${TOPIC_REPLICATION_FACTOR}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until kafka-topics --bootstrap-server $${KAFKA_BOOTSTRAP} --create --if-not-exists \
+              --topic $${RAW_TOPIC} --partitions $${RAW_PARTITIONS} --replication-factor $${TOPIC_REPLICATION_FACTOR} \
+          && kafka-topics --bootstrap-server $${KAFKA_BOOTSTRAP} --create --if-not-exists \
+              --topic $${AGG_TOPIC} --partitions $${AGG_PARTITIONS} --replication-factor $${TOPIC_REPLICATION_FACTOR} \
+          && kafka-topics --bootstrap-server $${KAFKA_BOOTSTRAP} --create --if-not-exists \
+              --topic $${DLQ_TOPIC} --partitions $${DLQ_PARTITIONS} --replication-factor $${TOPIC_REPLICATION_FACTOR}; do
+          echo "esperando a que los brokers acepten la creación de topics..."
+          sleep 5
+        done
+        echo "topics listos"
+
+  consumer:
+    build: .
+    image: ventas-app:latest
+    restart: unless-stopped
+    depends_on:
+      init-topics:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      RAW_TOPIC: ${RAW_TOPIC}
+      AGG_TOPIC: ${AGG_TOPIC}
+      DLQ_TOPIC: ${DLQ_TOPIC}
+      GROUP_ID: ${GROUP_ID}
+      WINDOW_SECONDS: ${WINDOW_SECONDS}
+      WINDOW_GRACE_SECONDS: ${WINDOW_GRACE_SECONDS}
+      DEDUP_RETENTION_SECONDS: ${DEDUP_RETENTION_SECONDS}
+      MAX_FUTURE_SKEW_SECONDS: ${MAX_FUTURE_SKEW_SECONDS}
+      STREAMS_STATE_DIR: /tmp/kafka-streams
+      # Métricas JMX de Kafka Streams para app-monitoring (Prometheus scrapea 9407 y 9408)
+      JAVA_TOOL_OPTIONS: -javaagent:/app/jmx_prometheus_javaagent.jar=9407:/app/jmx-app.yml
+    # Rango para `up -d --scale consumer=2`: la 1ª réplica toma 9407 y la 2ª 9408 (el agente escucha 9407 dentro de cada contenedor)
+    ports:
+      - "9407-9408:9407"
+
+  producer:
+    image: ventas-app:latest
+    container_name: ventas-producer
+    restart: unless-stopped
+    depends_on:
+      init-topics:
+        condition: service_completed_successfully
+      consumer:
+        condition: service_started
+    command: ["java", "-cp", "/app/app.jar", "cl.duoc.ventas.ProducerApp"]
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      RAW_TOPIC: ${RAW_TOPIC}
+      PRODUCE_INTERVAL: ${PRODUCE_INTERVAL}
+      INVALID_RATE: ${INVALID_RATE}
+      PRODUCER_MAX_EVENTS: ${PRODUCER_MAX_EVENTS}
+      CUSTOMER_POOL: ${CUSTOMER_POOL}
+      # Métricas JMX del producer para app-monitoring (Prometheus scrapea 9406)
+      JAVA_TOOL_OPTIONS: -javaagent:/app/jmx_prometheus_javaagent.jar=9406:/app/jmx-app.yml
+    ports:
+      - "9406:9406"
+
+  # Escenario determinista (válidos + inválidos, duplicado, tardíos). No arranca con `up`:
+  #   docker compose --profile scenario run --rm scenario
+  # Un solo tipo de caso (one-each|invalid|duplicate|late) con el stack arriba: ver "Un solo tipo de caso" en README.md.
+  scenario:
+    image: ventas-app:latest
+    profiles: ["scenario"]
+    restart: "no"
+    depends_on:
+      init-topics:
+        condition: service_completed_successfully
+    command: ["java", "-cp", "/app/app.jar", "cl.duoc.ventas.ScenarioProducer"]
+    environment:
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP}
+      RAW_TOPIC: ${RAW_TOPIC}
+      WINDOW_SECONDS: ${WINDOW_SECONDS}
+      WINDOW_GRACE_SECONDS: ${WINDOW_GRACE_SECONDS}

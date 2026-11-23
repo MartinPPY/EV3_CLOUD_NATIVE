@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Docker + Docker Compose v2 (plugin: `docker compose`)
+apt-get update -y
+apt-get install -y docker.io docker-compose-v2
+systemctl enable --now docker
+usermod -aG docker ${default_user}
+
+# AWS CLI v2 (apt en Ubuntu 22.04 solo trae v1); las credenciales vienen del instance profile
+if ! command -v aws >/dev/null 2>&1; then
+  apt-get install -y unzip curl
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+
+# SSM Agent (Ubuntu 22.04 lo trae como snap; se instala si faltara)
+if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic
+fi
+systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service

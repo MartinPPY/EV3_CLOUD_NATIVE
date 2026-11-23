@@ -1,0 +1,14 @@
+# Reglas del JMX Prometheus javaagent para los brokers (puerto 9404).
+# Nombres por defecto (sin lowercase): kafka_server_BrokerTopicMetrics_OneMinuteRate{name="..."},
+# kafka_server_ReplicaManager_Value{name="..."}, kafka_log_LogManager_Value{name="..."}, java_lang_*;
+# el dashboard ea3-observabilidad.json depende de estos nombres.
+lowercaseOutputName: false
+lowercaseOutputLabelNames: false
+whitelistObjectNames:
+  - "kafka.server:*"
+  - "kafka.controller:*"
+  - "kafka.network:*"
+  - "kafka.log:*"
+  - "java.lang:*"
+rules:
+  - pattern: ".*"

@@ -1,0 +1,34 @@
+# Reglas del JMX Prometheus javaagent para la app de ventas (9406 producer, 9407 Kafka Streams).
+# Nombres por defecto: kafka_producer_producer_metrics_record_send_rate, kafka_streams_stream_metrics_*,
+# kafka_consumer_consumer_fetch_manager_metrics_records_lag_avg, java_lang_*.
+# Métricas de negocio (MBean cl.duoc.ventas:type=BusinessMetrics, solo en el proceso Streams): ventas_*_total.
+lowercaseOutputName: false
+lowercaseOutputLabelNames: false
+whitelistObjectNames:
+  - "kafka.producer:*"
+  - "kafka.consumer:*"
+  - "kafka.streams:*"
+  - "java.lang:*"
+  - "cl.duoc.ventas:*"
+rules:
+  - pattern: 'cl.duoc.ventas<type=BusinessMetrics><>Procesadas: .*'
+    name: ventas_procesadas_total
+    type: COUNTER
+    help: Ventas validas, no tardias ni duplicadas, que entran a la agregacion
+  - pattern: 'cl.duoc.ventas<type=BusinessMetrics><>EnviadasDlq: .*'
+    name: ventas_enviadas_dlq_total
+    type: COUNTER
+    help: Registros enviados a la DLQ (invalidos + duplicados + tardios)
+  - pattern: 'cl.duoc.ventas<type=BusinessMetrics><>Invalidas: .*'
+    name: ventas_invalidas_total
+    type: COUNTER
+    help: Eventos rechazados por validacion (van a la DLQ)
+  - pattern: 'cl.duoc.ventas<type=BusinessMetrics><>Duplicadas: .*'
+    name: ventas_duplicadas_total
+    type: COUNTER
+    help: Eventos con eventId repetido (van a la DLQ)
+  - pattern: 'cl.duoc.ventas<type=BusinessMetrics><>Tardias: .*'
+    name: ventas_tardias_total
+    type: COUNTER
+    help: Eventos fuera del periodo de gracia, no agregados, van a la DLQ
+  - pattern: ".*"

@@ -1,0 +1,35 @@
+services:
+  kafka-2:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    container_name: kafka-2
+    network_mode: host
+    # El ZooKeeper vive en app-1: si aún no está arriba, el broker falla y Docker lo reintenta
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: ${ZOOKEEPER_IP}:${ZOOKEEPER_CLIENT_PORT}
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:${KAFKA_PORT}
+      # IP privada de esta EC2: es la dirección que los clientes y el otro broker usan para conectarse
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${PRIVATE_IP}:${KAFKA_PORT}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: ${KAFKA_MIN_INSYNC_REPLICAS}
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_INSYNC_REPLICAS}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS_ENABLE}
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+      - ./jmx:/opt/jmx:ro
+    # JMX Prometheus javaagent (9404) para app-monitoring (jar descargado por scripts/deploy-kafka.js en ./jmx).
+    # Se exporta solo en el proceso principal: así `docker compose exec ... kafka-topics` y el healthcheck no lo heredan
+    # (cada CLI Java intentaría abrir 9404 otra vez y fallaría).
+    command: ["bash", "-c", "export KAFKA_OPTS=\"$$KAFKA_OPTS -javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=9404:/opt/jmx/kafka.yml\"; exec /etc/confluent/docker/run"]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server ${PRIVATE_IP}:${KAFKA_PORT} > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  kafka-2-data:

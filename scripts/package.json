@@ -1,0 +1,17 @@
+{
+  "name": "act3-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Utilidades de despliegue (Kafka, app de ventas y monitoreo vía S3 + SSM; nginx + certbot vía SSM)",
+  "scripts": {
+    "configure-nginx": "node configure-nginx.js",
+    "deploy-kafka": "node deploy-kafka.js",
+    "deploy-app": "node deploy-app.js",
+    "deploy-monitoring": "node deploy-monitoring.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ec2": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/client-ssm": "^3.600.0"
+  }
+}

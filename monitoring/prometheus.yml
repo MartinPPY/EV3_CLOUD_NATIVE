@@ -1,0 +1,60 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # JMX Prometheus javaagent de cada broker (puerto 9404; ver monitoring/jmx/kafka.yml)
+  - job_name: kafka-brokers
+    static_configs:
+      - targets: ["${KAFKA_1_PRIVATE_IP}:9404"]
+        labels:
+          node: kafka-1
+      - targets: ["${KAFKA_2_PRIVATE_IP}:9404"]
+        labels:
+          node: kafka-2
+
+  # JMX Prometheus javaagent de ZooKeeper (puerto 9405; ver monitoring/jmx/zookeeper.yml)
+  - job_name: zookeeper
+    static_configs:
+      - targets: ["${ZOOKEEPER_PRIVATE_IP}:9405"]
+        labels:
+          node: zookeeper
+
+  # node_exporter de cada EC2 (puerto 9100; CPU, RAM y disco). node usa los mismos valores que Alloy en los logs.
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["${ZOOKEEPER_PRIVATE_IP}:9100"]
+        labels:
+          node: zookeper
+      - targets: ["${KAFKA_2_PRIVATE_IP}:9100"]
+        labels:
+          node: broker-0
+      - targets: ["${APP_PRIVATE_IP}:9100"]
+        labels:
+          node: app
+      - targets: ["${MONITORING_PRIVATE_IP}:9100"]
+        labels:
+          node: monitoring
+
+  # Contenedores de la app de ventas: producer (9406) y Kafka Streams (9407); ver app/jmx/app.yml
+  - job_name: ventas-app
+    static_configs:
+      - targets: ["${APP_PRIVATE_IP}:9406"]
+        labels:
+          node: app-producer
+      - targets: ["${APP_PRIVATE_IP}:9407"]
+        labels:
+          node: app-streams
+
+  # 2ª réplica de Kafka Streams (`docker compose up -d --scale consumer=2`, puerto 9408). Job aparte: sin escalar queda
+  # DOWN a propósito y no debe restar a "Procesos de la app disponibles" (up{job="ventas-app"}). Mismo label node para
+  # que los paneles de Streams (node="app-streams") y los ventas_*_total con sum() sumen ambas réplicas.
+  - job_name: ventas-app-escala
+    static_configs:
+      - targets: ["${APP_PRIVATE_IP}:9408"]
+        labels:
+          node: app-streams

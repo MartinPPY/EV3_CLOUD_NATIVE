@@ -1,0 +1,80 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:${CONFLUENT_VERSION}
+    container_name: zookeeper
+    profiles: ["zk"]
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: ${ZOOKEEPER_CLIENT_PORT}
+      ZOOKEEPER_TICK_TIME: ${ZOOKEEPER_TICK_TIME}
+      # El AdminServer (Jetty) ocupa el 8080 del host (network_mode host) y choca con Kafka UI
+      KAFKA_OPTS: -Dzookeeper.admin.enableServer=false
+    volumes:
+      - ./jmx:/opt/jmx:ro
+    # JMX Prometheus javaagent (9405) para app-monitoring (jar descargado por scripts/deploy-kafka.js en ./jmx).
+    # Se exporta solo en el proceso principal: así `docker compose exec ... kafka-topics` y el healthcheck no lo heredan
+    # (cada CLI Java intentaría abrir 9405 otra vez y fallaría).
+    command: ["bash", "-c", "export KAFKA_OPTS=\"$$KAFKA_OPTS -javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=9405:/opt/jmx/zookeeper.yml\"; exec /etc/confluent/docker/run"]
+    healthcheck:
+      # ZK 3.6+ solo habilita "srvr" por defecto (ruok no responde); /dev/tcp evita depender de nc
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${ZOOKEEPER_CLIENT_PORT} && echo srvr >&3 && grep -q Mode <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka-1:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    container_name: kafka-1
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: ${ZOOKEEPER_IP}:${ZOOKEEPER_CLIENT_PORT}
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:${KAFKA_PORT}
+      # IP privada de esta EC2: es la dirección que los clientes y el otro broker usan para conectarse
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${PRIVATE_IP}:${KAFKA_PORT}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: ${KAFKA_MIN_INSYNC_REPLICAS}
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_DEFAULT_REPLICATION_FACTOR}
+      KAFKA_MIN_INSYNC_REPLICAS: ${KAFKA_MIN_INSYNC_REPLICAS}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS_ENABLE}
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+      - ./jmx:/opt/jmx:ro
+    # JMX Prometheus javaagent (9404) para app-monitoring (jar descargado por scripts/deploy-kafka.js en ./jmx).
+    # Se exporta solo en el proceso principal: así `docker compose exec ... kafka-topics` y el healthcheck no lo heredan
+    # (cada CLI Java intentaría abrir 9404 otra vez y fallaría).
+    command: ["bash", "-c", "export KAFKA_OPTS=\"$$KAFKA_OPTS -javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=9404:/opt/jmx/kafka.yml\"; exec /etc/confluent/docker/run"]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server ${PRIVATE_IP}:${KAFKA_PORT} > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # UI web: nginx (80/443) la publica por HTTPS como reverse proxy hacia este puerto (ver scripts/configure-nginx.js)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:${KAFKA_UI_VERSION}
+    container_name: kafka-ui
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: ${KAFKA_UI_PORT}
+      KAFKA_CLUSTERS_0_NAME: ${KAFKA_UI_CLUSTER_NAME}
+      KAFKA_CLUSTERS_0_BOOTSTRAP_SERVERS: ${PRIVATE_IP}:${KAFKA_PORT},${BROKER_2_IP}:${KAFKA_PORT}
+      KAFKA_CLUSTERS_0_ZOOKEEPER: ${ZOOKEEPER_IP}:${ZOOKEEPER_CLIENT_PORT}
+      # La UI queda expuesta a internet: login obligatorio
+      AUTH_TYPE: LOGIN_FORM
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
+
+volumes:
+  kafka-1-data:
